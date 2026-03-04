@@ -14,7 +14,7 @@ from genrec.data.datasets.generative.tiger_dataset import TigerDataset
 from genrec.data.collators.generative.tiger_collator import TigerDataCollator
 from genrec.utils.nni_utils import get_nni_params, update_config_with_nni
 from genrec.utils.common_utils import set_seed
-from genrec.utils.logging_utils import setup_logging
+from genrec.utils.logging_utils import setup_logging, redirect_logging_to_dir
 from genrec.utils.evaluation_utils import evaluate_model_with_constrained_beam_search
 from genrec.utils.models_setup.conditional_t5_setup import create_t5_model
 from genrec.utils.models_setup.letter_setup import create_letter_model
@@ -93,7 +93,45 @@ def stage2_train_generation_model(
         logger.info("阶段2: 训练生成模型")
         logger.info("="*60)
     
-    model_save_path = model_config['model_save_path']
+    # ============ 确定模型保存路径 ============
+    # 优先使用 generative_config 中指定的自定义路径
+    custom_save_path = generative_config.get('save_model_path', None)
+    
+    if custom_save_path:
+        # 使用自定义保存路径
+        model_save_dir = custom_save_path
+        os.makedirs(model_save_dir, exist_ok=True)
+        model_save_path = os.path.join(model_save_dir, f"{model_config['dataset_name']}_final_model.pt")
+        
+        # ============ 重定向日志到实验目录 ============
+        if accelerator.is_main_process:
+            exp_name = os.path.basename(model_save_dir)  # 从路径提取实验名称
+            exp_log_dir = os.path.join(model_save_dir, 'logs')
+            new_log_path = redirect_logging_to_dir(logger, exp_log_dir, exp_name)
+            logger.info(f"日志已重定向到: {new_log_path}")
+            logger.info(f"使用自定义保存路径: {model_save_dir}")
+    else:
+        # 使用默认路径
+        model_save_dir = output_dirs['model']
+        model_save_path = model_config['model_save_path']
+        if accelerator.is_main_process:
+            logger.info(f"使用默认保存路径: {model_save_dir}")
+    
+    # ============ 输出训练参数 ============
+    if accelerator.is_main_process:
+        logger.info("-" * 40)
+        logger.info("训练参数配置:")
+        logger.info(f"  - learning_rate: {model_config['learning_rate']}")
+        logger.info(f"  - weight_decay: {model_config['weight_decay']}")
+        logger.info(f"  - batch_size: {model_config['batch_size']}")
+        logger.info(f"  - num_epochs: {model_config['num_epochs']}")
+        logger.info(f"  - warmup_ratio: {model_config.get('warmup_ratio', 0.05)}")
+        logger.info(f"  - dropout_rate: {model_config.get('dropout_rate', 0.1)}")
+        logger.info(f"  - evaluation_epoch: {model_config.get('evaluation_epoch', 5)}")
+        logger.info(f"  - early_stop_patience: {model_config.get('early_stop_upper_steps', 5)}")
+        logger.info(f"  - 模型保存路径: {model_save_dir}")
+        logger.info("-" * 40)
+    
     if not force_retrain and os.path.exists(model_save_path):
         if accelerator.is_main_process:
             logger.info(f"发现已存在的模型: {model_save_path}")
@@ -218,6 +256,7 @@ def stage2_train_generation_model(
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
         train_data_collator=train_data_collator,
+        custom_output_dir=model_save_dir if custom_save_path else None,  # 自定义输出目录
     )
     
     # ===== 开始训练 =====
@@ -237,12 +276,15 @@ def stage2_train_generation_model(
         num_beams=model_config.get("num_beams", 10),
         max_gen_length=model_config.get("max_gen_length", 5),
         logger=logger,
-        mode="Test"
+        mode="Test",
+        output_json_path=os.path.join(model_save_dir, "predictions.json"),
     )
     
     # ===== 保存最终模型 =====
     if "NNI_PLATFORM" not in os.environ:
-        trainer.save_model(output_dirs['model'])
+        trainer.save_model(model_save_dir)
+        if accelerator.is_main_process:
+            logger.info(f"模型已保存到: {model_save_dir}")
     
     if accelerator.is_main_process:
         logger.info("生成模型训练和评估完成!")

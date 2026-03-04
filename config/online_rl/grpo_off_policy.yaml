@@ -1,0 +1,16 @@
+# config/online_rl/grpo_off_policy.yaml
+
+trainer:
+  _target_: genrec.trainers.online_rl.grpo_off_policy_trainer.OffPolicyTrainer
+  _partial_: true
+  beta: 1
+  num_generations: 1
+  num_iterations: 5
+  steps_per_generation: 1
+  epsilon_low: 0.2
+  epsilon_high: 0.2
+  reward_func:
+    _target_: genrec.rewards.match_reward.MatchReward
+
+pretrained_model: "/home/zsj/pretrained-models/Beauty-Official/generation_model"
+save_model_path: "/home/zsj/pretrained-models/Beauty-PostTrain-Test"

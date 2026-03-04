@@ -1,0 +1,9 @@
+{
+    "model.learning_rate": {"_type": "choice", "_value": [1e-3,2e-3,3e-3]},
+    "model.weight_decay": {"_type": "choice", "_value": [0.1,0.2,0.3]},
+    "online_rl.trainer.beta": {"_type": "choice", "_value": [ 1, 0.5]},
+    "online_rl.trainer.num_generations": {"_type": "choice", "_value": [5]},
+    "model.batch_size": {"_type": "choice", "_value": [512]},
+    "model.num_epochs": {"_type": "choice", "_value": [20]},
+    "trainer.tau1": {"_type": "choice", "_value": [0.1,0.5]}
+}

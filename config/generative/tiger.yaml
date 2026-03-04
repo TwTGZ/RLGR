@@ -3,3 +3,7 @@
 trainer:
   _target_: genrec.trainers.generative.tiger_trainer.TigerTrainer
   _partial_: true
+
+# 模型保存路径（可选，不设置则使用默认路径 output_dir/generation_model/）
+# 可通过命令行覆盖：generative.save_model_path="./output/xxx/generation_model/lr2e-3_bsz512"
+save_model_path: null

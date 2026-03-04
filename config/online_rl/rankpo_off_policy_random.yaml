@@ -1,0 +1,22 @@
+# config/online_rl/rankpo_off_policy.yaml
+
+trainer:
+  _target_: genrec.trainers.online_rl.rankpo_off_policy_trainer_random.RankPOOffPolicyTrainer
+  _partial_: true
+  
+  # ===== RankPO 特有参数 =====
+  beta: 1
+  tau1: 3
+  tau2: 3
+  num_generations: 5
+  
+  # ===== Off-Policy 参数 =====
+  num_iterations: 5          # 每批数据重复训练的轮数
+  steps_per_generation: 1    # 每次生成的样本分成多少批
+  epsilon_low: 0.2           # Importance sampling 下界 (1 - epsilon_low)
+  epsilon_high: 0.2          # Importance sampling 上界 (1 + epsilon_high)
+  
+  # RankPO 不需要 reward_func（使用 sequence scores）
+
+pretrained_model: "/home/zsj/pretrained-models/Beauty-Official/generation_model"
+save_model_path: "/home/zsj/pretrained-models/Beauty-PostTrain-RankPO-OffPolicy"

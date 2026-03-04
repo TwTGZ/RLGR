@@ -1,0 +1,36 @@
+# nnictl create --config ./auto_hyper/online_rl/Beauty/parallel_model_config.yaml --port 8070
+experimentName: Your_Experiment_Name  
+max_trial_number: 100  
+
+searchSpaceFile: model_search_space.json  
+
+# 修改trialCommand，使用accelerate launch进行多卡训练
+trialCommand: >
+  export CUDA_VISIBLE_DEVICES=0,1,2,3 &&
+  accelerate launch --num_processes=4 train_with_online_rl.py 
+  tokenizer.data_text_files="./data/Beauty/item2title.pkl" 
+  tokenizer.interaction_files="./data/Beauty/user2item.pkl" 
+  output_dir="/home/zsj/pretrained-models/Beauty-Official" 
+  model.data_interaction_files="./data/Beauty/user2item.pkl" 
+  model.data_text_files="./data/Beauty/item2title.pkl" 
+  model.num_epochs=25 
+  online_rl=grpo
+  online_rl.pretrained_model="/home/zsj/pretrained-models/Beauty-Official/generation_model"  
+  online_rl.save_model_path="/home/zsj/pretrained-models/Beauty-PostTrain-Test" 
+
+trialCodeDirectory: ../../..  
+
+# 关键配置：每个trial使用4张GPU
+trialGpuNumber: 4       # 每个trial需要4张GPU
+trial_concurrency: 1    # 同时只运行1个trial（因为4张卡都给一个trial）
+
+tuner:  
+  name: TPE  
+  classArgs:  
+    optimize_mode: maximize  
+
+trainingService:  
+  platform: local  
+  maxTrialNumberPerGpu: 1  # 每张GPU上最多1个trial
+  useActiveGpu: true  
+  gpuIndices: [4,5,6,7]    # 使用GPU 0-3

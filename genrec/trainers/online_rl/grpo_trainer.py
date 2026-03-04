@@ -34,7 +34,9 @@ class GRPOTrainer(BaseOnlineRLTrainer):
         
         if num_generated > 0:
             with torch.no_grad():
-                outputs = self.model.generate(
+                # 多卡训练时需要 unwrap 获取原始模型
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                outputs = unwrapped_model.generate(
                     input_ids=encoder_input_ids,
                     attention_mask=encoder_attention_mask,
                     max_length=self.max_completion_length,
@@ -104,21 +106,39 @@ class GRPOTrainer(BaseOnlineRLTrainer):
         # ===== Compute rewards =====
         generated_items = []
         target_items = []
+        generated_tokens_list = []  # 用于前缀匹配奖励
+        target_tokens_list = []     # 用于前缀匹配奖励
         
         for i in range(generated_ids.size(0)):
             gen_tokens = generated_ids[i].cpu().tolist()
             gen_item = self._tokens_to_item(gen_tokens)
             generated_items.append(gen_item if gen_item is not None else -1)
             
+            # 清理后的 token 序列（去掉 pad, eos, decoder_start）
+            clean_gen_tokens = [
+                t for t in gen_tokens 
+                if t not in [self.pad_token_id, self.eos_token_id, self.decoder_start_token_id]
+            ]
+            generated_tokens_list.append(clean_gen_tokens)
+            
             sample_idx = i // num_beams
             target_tokens = target_labels[sample_idx].cpu().tolist()
             target_item = self._tokens_to_item(target_tokens)
             target_items.append(target_item if target_item is not None else -1)
+            
+            # 清理后的 target token 序列
+            clean_target_tokens = [
+                t for t in target_tokens 
+                if t not in [self.pad_token_id, self.eos_token_id, self.decoder_start_token_id]
+            ]
+            target_tokens_list.append(clean_target_tokens)
         
         rewards = self.reward_func(
             generated_items, 
             target_items, 
-            num_generations=self.num_generations
+            num_generations=self.num_generations,
+            generated_tokens=generated_tokens_list,  # 传递 token 信息
+            target_tokens=target_tokens_list          # 传递 token 信息
         )
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
         
@@ -180,13 +200,22 @@ class GRPOTrainer(BaseOnlineRLTrainer):
                 gen_rewards = rewards_reshaped[:, :num_generated].mean()
                 self._metrics["gen_reward"].append(gen_rewards.item())
         
+        # 计算本地 diversity 和 accuracy
         unique_items = len(set([item for item in generated_items if item != -1]))
         total_items = len([item for item in generated_items if item != -1])
         diversity = unique_items / total_items if total_items > 0 else 0.0
-        self._metrics["diversity"].append(diversity)
-        
+
         correct = sum([1 for gen, tgt in zip(generated_items, target_items) if gen == tgt and gen != -1])
         accuracy = correct / len(generated_items) if len(generated_items) > 0 else 0.0
+
+        # 多卡时 gather 取平均，单卡时直接使用本地值
+        if self.accelerator.num_processes > 1:
+            diversity_tensor = torch.tensor(diversity, device=device)
+            accuracy_tensor = torch.tensor(accuracy, device=device)
+            diversity = self.accelerator.gather_for_metrics(diversity_tensor).mean().item()
+            accuracy = self.accelerator.gather_for_metrics(accuracy_tensor).mean().item()
+
+        self._metrics["diversity"].append(diversity)
         self._metrics["accuracy"].append(accuracy)
         
         return {

@@ -1,5 +1,6 @@
 # genrec/utils/trainer_setup/online_rl/online_rl_setup.py
 
+import os
 from typing import Optional, Dict, List, Callable
 from functools import partial
 from transformers import TrainingArguments, EarlyStoppingCallback
@@ -9,7 +10,7 @@ from omegaconf import DictConfig
 from genrec.utils.metrics import compute_metrics
 from genrec.utils.callbacks.generative.generative_callback import (
     GenerativeLoggingCallback,
-    EvaluateEveryNEpochsCallback
+    DelayedEvaluateEveryNEpochsCallback
 )
 from genrec.utils.models_setup.conditional_t5_setup import create_t5_model
 
@@ -25,14 +26,27 @@ def setup_training(
     per_device_train_batch_size,
     per_device_eval_batch_size,
     train_data_collator,
+    custom_output_dir=None,  # 【新增】自定义输出目录（用于checkpoint和日志）
 ):
     """
     统一的 Online RL 训练设置函数
+    
+    Args:
+        custom_output_dir: 自定义输出目录（用于checkpoint和日志），为None则使用默认
     """
+    
+    # ============【新增】确定输出目录 ============
+    if custom_output_dir:
+        checkpoint_dir = custom_output_dir
+        log_dir = os.path.join(custom_output_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+    else:
+        checkpoint_dir = output_dirs['model']
+        log_dir = output_dirs['logs']
     
     # ===== 1. 训练参数配置 =====
     training_args = TrainingArguments(
-        output_dir=output_dirs['model'],
+        output_dir=checkpoint_dir,  # 【修改】使用自定义目录
         num_train_epochs=model_config['num_epochs'],
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
@@ -41,8 +55,8 @@ def setup_training(
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
-        load_best_model_at_end=True,
-        logging_dir=output_dirs['logs'],
+        load_best_model_at_end=False,  # 禁用自动加载，避免多卡同步问题，改为手动加载
+        logging_dir=log_dir,  # 【修改】使用自定义目录
         logging_steps=100,
         report_to=[],
         warmup_ratio=model_config["warmup_ratio"],
@@ -76,15 +90,21 @@ def setup_training(
             early_stopping_patience=model_config.get("early_stop_upper_steps", 1000)
         ),
         GenerativeLoggingCallback(logger),
-        EvaluateEveryNEpochsCallback(
-            n_epochs=model_config.get("evaluation_epoch", 5)
+        DelayedEvaluateEveryNEpochsCallback(
+            n_epochs=model_config.get("evaluation_epoch", 5),
+            start_epoch=model_config.get("eval_start_epoch", 0)
         )
     ]
     
     # ===== 4. 创建参考模型 =====
     # logger.info("创建参考模型（Reference Model）...")
+    # ref_model = create_t5_model(
+    #     vocab_size=tokenizer.vocab_size,
+    #     model_config=model_config
+    # )
+    # ref_model.load_state_dict(model.state_dict())
     ref_model = create_t5_model(
-        vocab_size=tokenizer.vocab_size,
+        vocab_size=model.config.vocab_size, 
         model_config=model_config
     )
     ref_model.load_state_dict(model.state_dict())

@@ -53,6 +53,7 @@ class BaseOnlineRLTrainer(Trainer, ABC):
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
         optimizers: Tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
+        add_gt: bool = True,  # 是否在采样时添加 Ground Truth
     ):
         # ... (same as before)
         
@@ -84,7 +85,7 @@ class BaseOnlineRLTrainer(Trainer, ABC):
         self.log_completions = args.log_completions if hasattr(args, 'log_completions') else False
         
         # ===== Training flags =====
-        self.add_gt = True
+        self.add_gt = add_gt
         
         # ===== Initialize parent Trainer =====
         super().__init__(
@@ -99,8 +100,14 @@ class BaseOnlineRLTrainer(Trainer, ABC):
         )
         
         # ===== Prepare reference model with accelerator =====
+        # if hasattr(self, "accelerator"):
+        #     self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+        # else:
+        #     raise AttributeError("Trainer does not have an accelerator object")
         if hasattr(self, "accelerator"):
-            self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+            # 不使用 prepare_model 包装（避免 DDP 同步问题）
+            # 直接移到对应设备
+            self.ref_model = self.ref_model.to(self.accelerator.device)
         else:
             raise AttributeError("Trainer does not have an accelerator object")
     
@@ -167,6 +174,10 @@ class BaseOnlineRLTrainer(Trainer, ABC):
                 compute_fn=lambda g: compute_rankpo_advantages(g, num_seqs, tau),
             )
         """
+        # ===== 添加同步屏障（多卡时确保所有进程就绪）=====
+        if self.accelerator.num_processes > 1:
+            self.accelerator.wait_for_everyone()
+            
         # ===== Step 1: Gather tensors from all processes =====
         gathered_tensors = {}
         for key, tensor in tensors_to_gather.items():

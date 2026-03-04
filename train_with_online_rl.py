@@ -12,7 +12,7 @@ from genrec.data.datasets.generative.tiger_dataset import TigerDataset
 from genrec.data.collators.generative.tiger_collator import TigerDataCollator
 from genrec.utils.nni_utils import get_nni_params, update_config_with_nni
 from genrec.utils.common_utils import set_seed
-from genrec.utils.logging_utils import setup_logging
+from genrec.utils.logging_utils import setup_logging, redirect_logging_to_dir
 from genrec.utils.evaluation_utils import evaluate_model_with_constrained_beam_search
 from genrec.utils.models_setup.conditional_t5_setup import create_t5_model
 from genrec.utils.trainer_setup.online_rl_setup import setup_training
@@ -101,7 +101,13 @@ def stage2_train_generation_model(
         model_save_dir = custom_save_path
         os.makedirs(model_save_dir, exist_ok=True)
         model_save_path = os.path.join(model_save_dir, f"{model_config['dataset_name']}_final_model.pt")
+        
+        # ============ 重定向日志到实验目录 ============
         if accelerator.is_main_process:
+            exp_name = os.path.basename(model_save_dir)  # 从路径提取实验名称
+            exp_log_dir = os.path.join(model_save_dir, 'logs')
+            new_log_path = redirect_logging_to_dir(logger, exp_log_dir, exp_name)
+            logger.info(f"日志已重定向到: {new_log_path}")
             logger.info(f"使用自定义保存路径: {model_save_dir}")
     else:
         # 使用默认路径
@@ -129,6 +135,7 @@ def stage2_train_generation_model(
             logger.info("请先运行阶段1进行训练。")
         return False
         
+    # ============ 阶段2.1: 初始化（加载tokenizer、模型、数据集）============
     try:
         # ============ 加载 Tokenizer ============
         if accelerator.is_main_process:
@@ -211,15 +218,15 @@ def stage2_train_generation_model(
             mode='test'
         )
      
-        test_dataloader = DataLoader(
-            test_dataset, 
-            batch_size=model_config['test_batch_size'],
-            shuffle=False,
-            collate_fn=test_data_collator
-        )
+        # test_dataloader = DataLoader(
+        #     test_dataset, 
+        #     batch_size=model_config['test_batch_size'],
+        #     shuffle=False,
+        #     collate_fn=test_data_collator
+        # )
           
-        # 使用 accelerator 准备数据加载器
-        test_dataloader = accelerator.prepare(test_dataloader)
+        # # 使用 accelerator 准备数据加载器
+        # test_dataloader = accelerator.prepare(test_dataloader)
           
         # ============ 计算 Batch Size ============
         train_batch_size = model_config['batch_size']
@@ -257,50 +264,161 @@ def stage2_train_generation_model(
             logger,
             per_device_train_batch_size=per_device_train_batch_size,
             per_device_eval_batch_size=per_device_eval_batch_size,
-            train_data_collator=eval_data_collator
+            train_data_collator=eval_data_collator,
+            custom_output_dir=model_save_dir if custom_save_path else None,  # 传递自定义输出目录
         )
         
-        # ============ 开始训练 ============
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 初始化阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.2: 训练 ============
+    try:
+        if accelerator.is_main_process:
+            logger.info("="*40)
+            logger.info("开始训练...")
+            logger.info("="*40)
+        
         trainer.train()
         accelerator.wait_for_everyone()
-          
-        # ============ 测试评估 ============
+        
         if accelerator.is_main_process:
-            logger.info("使用约束beam search进行测试评估...")
-          
-        evaluate_model_with_constrained_beam_search(
-            model=model,
-            eval_dataloader=test_dataloader,
-            accelerator=accelerator,
-            tokenizer=tokenizer,
-            k_list=model_config.get("k_list", [5, 10, 20]),
-            num_beams=model_config.get("num_beams", 10),
-            max_gen_length=model_config.get("max_gen_length", 5),
-            logger=logger,
-            mode="Test"
-        )
-          
-        # ============ 保存最终模型 ============
+            logger.info("✅ 训练阶段完成")
+        
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 训练阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.3: 加载最佳模型 ============
+    try:
+        if trainer.state.best_model_checkpoint:
+            if accelerator.is_main_process:
+                logger.info(f"🔄 加载最佳模型: {trainer.state.best_model_checkpoint}")
+                logger.info(f"   最佳 ndcg@10: {trainer.state.best_metric:.4f}")
+            
+            # 使用 unwrap 后的模型加载，避免 DDP 问题
+            unwrapped_model = accelerator.unwrap_model(model)
+            best_model_path = trainer.state.best_model_checkpoint
+            
+            # 加载最佳模型权重
+            from transformers import T5ForConditionalGeneration
+            best_model = T5ForConditionalGeneration.from_pretrained(best_model_path)
+            unwrapped_model.load_state_dict(best_model.state_dict())
+            del best_model  # 释放内存
+            
+            if accelerator.is_main_process:
+                logger.info(f"✅ 已成功加载最佳模型")
+        else:
+            if accelerator.is_main_process:
+                logger.info("⚠️ 未找到最佳 checkpoint，使用最后一个 epoch 的模型")
+        
+        accelerator.wait_for_everyone()
+        
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 加载最佳模型失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.4: 保存模型（在销毁进程组之前）============
+    try:
         if "NNI_PLATFORM" not in os.environ:
+            accelerator.wait_for_everyone()
+            
             if accelerator.is_main_process:
                 logger.info(f"💾 保存最终模型到: {model_save_dir}")
-            
-            # 保存到指定路径
-            trainer.save_model(model_save_dir)
-            
-            if accelerator.is_main_process:
+                unwrapped_model = accelerator.unwrap_model(trainer.model)
+                unwrapped_model.save_pretrained(
+                    model_save_dir,
+                    safe_serialization=True
+                )
                 logger.info(f"✅ 模型已保存到: {model_save_dir}")
                 logger.info(f"   - Hugging Face 格式文件")
                 logger.info(f"   - 检查点目录: {model_config.get('checkpoint_dir', 'N/A')}")
-          
-        if accelerator.is_main_process:
-            logger.info("生成模型训练和评估完成!")
-          
-        return True
-          
+            
+            accelerator.wait_for_everyone()
+        
     except Exception as e:
         if accelerator.is_main_process:
-            logger.error(f"生成模型训练失败: {str(e)}")
+            logger.error(f"❌ 保存模型阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.5: 测试评估（销毁进程组后单卡运行，避免 NCCL 超时）============
+    try:
+        accelerator.wait_for_everyone()
+        
+        # 保存必要信息（销毁进程组后仍可使用）
+        is_main = accelerator.is_main_process
+        local_device = accelerator.device
+        unwrapped_model = accelerator.unwrap_model(trainer.model)
+        
+        # 销毁分布式进程组，避免非主进程在评估期间 NCCL 超时
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        
+        # 非主进程直接返回（不再有 NCCL 通信需求）
+        if not is_main:
+            return True
+        
+        # ===== 以下仅主进程执行 =====
+        logger.info("="*40)
+        logger.info("使用约束beam search进行测试评估...")
+        logger.info("="*40)
+        
+        # 创建不依赖 NCCL 的简单 accelerator
+        class SimpleAccelerator:
+            def __init__(self, device):
+                self.device = device
+            @property
+            def is_main_process(self):
+                return True
+            def gather_for_metrics(self, tensor):
+                return tensor
+            def wait_for_everyone(self):
+                pass
+            def unwrap_model(self, model):
+                return model
+        
+        simple_acc = SimpleAccelerator(local_device)
+        
+        # 创建非分布式的 DataLoader
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=model_config['test_batch_size'],
+            shuffle=False,
+            collate_fn=test_data_collator
+        )
+        
+        evaluate_model_with_constrained_beam_search(
+            model=unwrapped_model,
+            eval_dataloader=test_dataloader,
+            accelerator=simple_acc,
+            tokenizer=tokenizer,
+            k_list=model_config.get("k_list", [1, 5, 10]),
+            num_beams=model_config.get("num_beams", 10),
+            max_gen_length=model_config.get("max_gen_length", 5),
+            logger=logger,
+            mode="Test",
+            output_json_path=os.path.join(model_save_dir, "predictions.json"),
+        )
+        
+        logger.info("✅ 测试评估完成")
+        logger.info("🎉 训练和评估全部完成!")
+        return True
+        
+    except Exception as e:
+        if is_main:
+            logger.error(f"❌ 测试评估失败: {str(e)}")
             import traceback
             traceback.print_exc()
         return False
@@ -383,7 +501,11 @@ def main(cfg: DictConfig):
             logger.info("训练流程中遇到错误")
         logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("="*60)
-    accelerator.wait_for_everyone()
+    
+    # 进程组可能已在测试评估阶段被销毁，需要检查后再同步
+    import torch.distributed as dist
+    if dist.is_initialized():
+        accelerator.wait_for_everyone()
 
 if __name__ == '__main__':
     main()

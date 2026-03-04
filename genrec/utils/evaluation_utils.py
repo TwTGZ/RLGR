@@ -119,7 +119,8 @@ def evaluate_model_with_constrained_beam_search(
 
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
-                outputs = model.generate(
+                unwrapped_model = accelerator.unwrap_model(model)
+                outputs = unwrapped_model.generate(
                     input_ids=input_ids, attention_mask=attention_mask, max_length=2,
                     num_beams=1, return_dict_in_generate=True, output_attentions=True
                 )
@@ -186,12 +187,13 @@ def evaluate_model_with_constrained_beam_search(
     all_labels = []
     device = accelerator.device
     progress_bar = tqdm(eval_dataloader, desc=f"{mode}", disable=not accelerator.is_main_process)
+    unwrapped_model = accelerator.unwrap_model(model)  # 多卡训练时避免 DDP 同步问题
     for batch_idx, batch in enumerate(progress_bar):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         true_item_ids = batch['label_id']
         # encoder_item_ids = batch['encoder_item_ids'].to(device) 
-        outputs = model.generate(
+        outputs = unwrapped_model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
             max_length=max_gen_length,

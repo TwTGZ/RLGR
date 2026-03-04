@@ -189,10 +189,10 @@ class RankPOTrainer(BaseOnlineRLTrainer):
             exceeding   = (scores_reshaped - quantiles_reshaped.unsqueeze(1))
             
             all_score   = exceeding
-            pos_score   = exceeding[:,-1].unsqueeze(-1)
+            pos_score   = -exceeding[:,-1].unsqueeze(-1)
 
             all_delta   = self.activation(all_score,self.tau1)
-            pos_delta   = self.activation(pos_score,self.tau2)
+            pos_delta   = torch.sigmoid(pos_score)
 
             
 
@@ -201,9 +201,8 @@ class RankPOTrainer(BaseOnlineRLTrainer):
             neg_advantage   = -(all_delta / (delta_sum + 1e-8)) * (1 - is_positive_reshaped)
 
 
-            advantages = ((pos_advantage + neg_advantage))
+            advantages = ((pos_advantage + neg_advantage) * pos_delta)
             advantages = advantages.view(-1)
-            
             return advantages
         
         advantages, gathered_data = self._gather_compute_slice(

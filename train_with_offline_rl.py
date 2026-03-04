@@ -13,7 +13,7 @@ from genrec.data.datasets.offline_rl.sdpo_dataset import SDPODataset
 from genrec.data.collators.offline_rl.sdpo_collator import SDPODataCollator
 from genrec.utils.nni_utils import get_nni_params, update_config_with_nni
 from genrec.utils.common_utils import set_seed
-from genrec.utils.logging_utils import setup_logging
+from genrec.utils.logging_utils import setup_logging, redirect_logging_to_dir
 from genrec.utils.evaluation_utils import evaluate_model_with_constrained_beam_search
 from genrec.utils.models_setup.conditional_t5_setup import create_t5_model
 from genrec.utils.trainer_setup.offline_rl_setup import setup_training  # 🔥 修改导入
@@ -100,7 +100,13 @@ def stage2_train_generation_model(
         model_save_dir = custom_save_path
         os.makedirs(model_save_dir, exist_ok=True)
         model_save_path = os.path.join(model_save_dir, f"{model_config['dataset_name']}_final_model.pt")
+        
+        # ============ 重定向日志到实验目录 ============
         if accelerator.is_main_process:
+            exp_name = os.path.basename(model_save_dir)  # 从路径提取实验名称
+            exp_log_dir = os.path.join(model_save_dir, 'logs')
+            new_log_path = redirect_logging_to_dir(logger, exp_log_dir, exp_name)
+            logger.info(f"日志已重定向到: {new_log_path}")
             logger.info(f"使用自定义保存路径: {model_save_dir}")
     else:
         # 使用默认路径
@@ -128,6 +134,7 @@ def stage2_train_generation_model(
             logger.info("请先运行阶段1进行训练。")
         return False
     
+    # ============ 阶段2.1: 初始化（加载tokenizer、模型、数据集）============
     try:
         # ============ 加载 Tokenizer ============
         if accelerator.is_main_process:
@@ -248,7 +255,7 @@ def stage2_train_generation_model(
             os.makedirs(checkpoint_dir, exist_ok=True)
             model_config['checkpoint_dir'] = checkpoint_dir
         
-        # 🔥 使用统一的 setup_training
+        # 使用统一的 setup_training
         trainer = setup_training(
             model,
             tokenizer,
@@ -264,13 +271,39 @@ def stage2_train_generation_model(
             eval_data_collator=eval_data_collator,
         )
         
-        # ============ 开始训练 ============
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 初始化阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.2: 训练 ============
+    try:
+        if accelerator.is_main_process:
+            logger.info("="*40)
+            logger.info("开始训练...")
+            logger.info("="*40)
+        
         trainer.train()
         accelerator.wait_for_everyone()
         
-        # ============ 测试评估 ============
         if accelerator.is_main_process:
+            logger.info("✅ 训练阶段完成")
+        
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 训练阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.3: 测试评估 ============
+    try:
+        if accelerator.is_main_process:
+            logger.info("="*40)
             logger.info("使用约束beam search进行测试评估...")
+            logger.info("="*40)
         
         evaluate_model_with_constrained_beam_search(
             model=model,
@@ -281,11 +314,25 @@ def stage2_train_generation_model(
             num_beams=model_config.get("num_beams", 10),
             max_gen_length=model_config.get("max_gen_length", 5),
             logger=logger,
-            mode="Test"
+            mode="Test",
+            output_json_path=os.path.join(model_save_dir, "predictions.json"),
         )
         
-        # ============ 保存最终模型 ============
+        if accelerator.is_main_process:
+            logger.info("✅ 测试评估完成")
+        
+    except Exception as e:
+        if accelerator.is_main_process:
+            logger.error(f"❌ 测试评估阶段失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # ============ 阶段2.4: 保存模型 ============
+    try:
         if "NNI_PLATFORM" not in os.environ:
+            accelerator.wait_for_everyone()
+            
             if accelerator.is_main_process:
                 logger.info(f"💾 保存最终模型到: {model_save_dir}")
             
@@ -296,15 +343,17 @@ def stage2_train_generation_model(
                 logger.info(f"✅ 模型已保存到: {model_save_dir}")
                 logger.info(f"   - Hugging Face 格式文件")
                 logger.info(f"   - 检查点目录: {model_config.get('checkpoint_dir', 'N/A')}")
+            
+            accelerator.wait_for_everyone()
         
         if accelerator.is_main_process:
-            logger.info("生成模型训练和评估完成!")
+            logger.info("🎉 生成模型训练和评估完成!")
         
         return True
-    
+        
     except Exception as e:
         if accelerator.is_main_process:
-            logger.error(f"生成模型训练失败: {str(e)}")
+            logger.error(f"❌ 保存模型阶段失败: {str(e)}")
             import traceback
             traceback.print_exc()
         return False

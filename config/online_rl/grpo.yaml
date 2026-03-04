@@ -6,9 +6,8 @@ trainer:
   beta: 1
   num_generations: 4
   reward_func:
-    _target_: genrec.rewards.grpo_reward.GRPOReward
-    use_ndcg: true
-    ndcg_weight: 0.5
+    _target_: genrec.rewards.match_reward.MatchReward
+    
 
 pretrained_model: "/home/zsj/pretrained-models/Beauty-Official/generation_model"
 save_model_path: "/home/zsj/pretrained-models/Beauty-PostTrain-Test"

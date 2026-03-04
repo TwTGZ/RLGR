@@ -1,5 +1,6 @@
 # genrec/utils/trainer_setup/generative/generative_setup.py
 
+import os
 from typing import Optional, Dict, List
 from functools import partial
 from transformers import TrainingArguments, EarlyStoppingCallback
@@ -25,6 +26,7 @@ def setup_training(
     per_device_train_batch_size,
     per_device_eval_batch_size,
     train_data_collator,
+    custom_output_dir=None,  # 自定义输出目录（用于checkpoint和日志）
 ):
     """
     统一的 Generative 训练设置函数
@@ -41,11 +43,21 @@ def setup_training(
         per_device_train_batch_size: 训练批次大小
         per_device_eval_batch_size: 评估批次大小
         train_data_collator: 训练数据 collator
+        custom_output_dir: 自定义输出目录（用于checkpoint和日志），为None则使用默认
     """
+    
+    # ============ 确定输出目录 ============
+    if custom_output_dir:
+        checkpoint_dir = custom_output_dir
+        log_dir = os.path.join(custom_output_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+    else:
+        checkpoint_dir = output_dirs['model']
+        log_dir = output_dirs['logs']
     
     # ===== 1. 训练参数配置 =====
     training_args = TrainingArguments(
-        output_dir=output_dirs['model'],
+        output_dir=checkpoint_dir,
         num_train_epochs=model_config['num_epochs'],
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
@@ -55,7 +67,7 @@ def setup_training(
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
-        logging_dir=output_dirs['logs'],
+        logging_dir=log_dir,
         logging_steps=100,
         report_to=[],
         warmup_ratio=model_config["warmup_ratio"],
